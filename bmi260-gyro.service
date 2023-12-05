@@ -1,0 +1,10 @@
+[Unit]
+Description=BMI260 Gyroscope
+
+[Service]
+Type=simple
+User=arch
+ExecStart=/bin/python3 /home/arch/Ryzen/scripts/bmi260_drv.py
+
+[Install]
+WantedBy=multi-user.target
