@@ -58,9 +58,13 @@ vel = [0, 0]
 while True:
     # load config
     if time() - last_cfg_read_time > 1:
-        cfg = json.load(open('/home/arch/GPD/BMI260/gyro.json'))
-        last_cfg_read_time = time()
-        # print(cfg)
+        try:
+            cfg = json.load(open('/home/arch/GPD/BMI260/gyro.json'))
+            last_cfg_read_time = time()
+            # print(cfg)
+        except:
+            sleep(1)
+            continue
 
     if cfg['mode'] != 'mouse':
         sleep(1)
