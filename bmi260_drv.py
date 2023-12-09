@@ -10,38 +10,6 @@ from dataclasses import dataclass
 from libevdev import Device, InputEvent, EV_REL, EV_KEY, EV_ABS, EV_SYN
 
 
-CFG_UPDATE_DELAY = 0.5
-
-def get_sensor():
-    # init
-    sensor = BMI270(registers.I2C_SEC_ADDR)
-    sensor.soft_reset()
-    sensor.load_config_file(bmi260_config_file)
-
-    # config
-    sensor.set_mode(definitions.PERFORMANCE_MODE)
-
-    # sensor.set_acc_range(definitions.ACC_RANGE_2G)
-    # sensor.set_acc_odr(definitions.ACC_ODR_200)
-    # sensor.set_acc_bwp(definitions.ACC_BWP_OSR4)
-
-    sensor.set_gyr_range(definitions.GYR_RANGE_2000)
-    sensor.set_gyr_odr(definitions.GYR_ODR_200)
-    sensor.set_gyr_bwp(definitions.GYR_BWP_OSR4)
-
-    sensor.disable_fifo_header()
-    sensor.enable_data_streaming()
-    # sensor.enable_acc_filter_perf()
-    sensor.enable_gyr_noise_perf()
-    sensor.enable_gyr_filter_perf()
-
-    sensor.disable_acc()
-    sensor.disable_aux()
-    sensor.enable_gyr()
-
-    return sensor
-
-
 @dataclass
 class VirtualPointerData:
     prev: int
@@ -50,96 +18,135 @@ class VirtualPointerData:
 
 @dataclass
 class VirtualPointer:
+    vel: [int, int]
     x: VirtualPointerData
     y: VirtualPointerData
 
 
-# init
-sensor = get_sensor()
-
-gyro_dev = Device()
-gyro_dev.name = 'BMI260 gyro'
-
-gyro_dev.enable(EV_KEY.BTN_LEFT)
-gyro_dev.enable(EV_KEY.BTN_RIGHT)
-# gyro_dev.enable(EV_ABS.ABS_RX)
-# gyro_dev.enable(EV_ABS.ABS_RY)
-gyro_dev.enable(EV_REL.REL_X)
-gyro_dev.enable(EV_REL.REL_Y)
-
-gyro_inp = gyro_dev.create_uinput_device()
-print('new uinput test device at {}'.format(gyro_inp.devnode))
-
-# config
-last_cfg_read_time = time()
-cfg = json.load(open('/home/arch/GPD/BMI260/gyro.json'))
-
-virt_ptr = VirtualPointer(
-    VirtualPointerData(0, 0, False),
-    VirtualPointerData(0, 0, False)
-)
-
-vel = [0, 0]
-
-# run
-while True:
-    # load config
-    if time() - last_cfg_read_time > CFG_UPDATE_DELAY:
-        try:
-            cfg = json.load(open('/home/arch/GPD/BMI260/gyro.json'))
-            last_cfg_read_time = time()
-            # print(cfg)
-        except:
-            sleep(CFG_UPDATE_DELAY)
-            continue
-        
-        # check sensor
-        if sensor.read_register(registers.INTERNAL_STATUS) == 0:
-            sensor = get_sensor()
-            print('sensor reinitialized')
-
-    if (not cfg['enable']) or cfg['mode'] != 'mouse':
-        sleep(CFG_UPDATE_DELAY)
-        continue
-
-    planes = {
+class BMI260Driver:
+    PLANES = {
         'xy' : (0, 1),
         'xz': (2, 1)
     }
 
-    plane = planes.get(cfg['plane'])
-    if plane is None:
-        print(f'unexpected plane "{cfg["plane"]}"')
-        sleep(1)
-        continue
+    def __init__(self, gyro_cfg_path, gyro_cfg_update_delay=0.5):
+        self.gyro_cfg_path = gyro_cfg_path
+        self.gyro_cfg_update_delay = gyro_cfg_update_delay
 
-    # read data
-    data = sensor.get_gyr_data()
+        self.init_sensor()
+        self.init_dev()
+        self.load_cfg()
 
-    vel[0] *= 0.8
-    vel[1] *= 0.8
+        self.virt_ptr = VirtualPointer(
+            [0, 0],
+            VirtualPointerData(0, 0, False),
+            VirtualPointerData(0, 0, False)
+        )
 
-    vel[0] += cfg['sens'] * data[plane[0]]
-    vel[1] += cfg['sens'] * data[plane[1]]
+    def init_dev(self):
+        self.gyro_dev = Device()
+        self.gyro_dev.name = 'BMI260 gyro'
 
-    virt_ptr.x.curr -= vel[0] if abs(vel[0]) > 0.05 else 0
-    virt_ptr.x.changed = True if abs(virt_ptr.x.curr - virt_ptr.x.prev) >= 1 else False
+        self.gyro_dev.enable(EV_KEY.BTN_LEFT)
+        self.gyro_dev.enable(EV_KEY.BTN_RIGHT)
+        # self.gyro_dev.enable(EV_ABS.ABS_RX)
+        # self.gyro_dev.enable(EV_ABS.ABS_RY)
+        self.gyro_dev.enable(EV_REL.REL_X)
+        self.gyro_dev.enable(EV_REL.REL_Y)
 
-    virt_ptr.y.curr -= vel[1] if abs(vel[1]) > 0.05 else 0
-    virt_ptr.y.changed = True if abs(virt_ptr.y.curr - virt_ptr.y.prev) >= 1 else False
+        self.gyro_inp = self.gyro_dev.create_uinput_device()
+        print('new uinput test device at {}'.format(self.gyro_inp.devnode))
 
-    # print(f'{data} -> {vel} -> {virt_ptr}')
+    def init_sensor(self):
+        # init
+        self.sensor = BMI270(registers.I2C_SEC_ADDR)
+        self.sensor.soft_reset()
+        self.sensor.load_config_file(bmi260_config_file)
 
-    # send events
-    events = [
-        InputEvent(EV_REL.REL_X, (int(virt_ptr.x.curr) - virt_ptr.x.prev) if virt_ptr.x.changed else 0),
-        InputEvent(EV_REL.REL_Y, (int(virt_ptr.y.curr) - virt_ptr.y.prev) if virt_ptr.y.changed else 0),
-        InputEvent(EV_SYN.SYN_REPORT, 0)
-    ]
-    gyro_inp.send_events(events)
+        # config
+        self.sensor.set_mode(definitions.PERFORMANCE_MODE)
 
-    if abs(virt_ptr.x.curr - virt_ptr.x.prev) >= 1:
-        virt_ptr.x.prev = int(virt_ptr.x.curr)
+        # self.sensor.set_acc_range(definitions.ACC_RANGE_2G)
+        # self.sensor.set_acc_odr(definitions.ACC_ODR_200)
+        # self.sensor.set_acc_bwp(definitions.ACC_BWP_OSR4)
 
-    if abs(virt_ptr.y.curr - virt_ptr.y.prev) >= 1:
-        virt_ptr.y.prev = int(virt_ptr.y.curr)
+        self.sensor.set_gyr_range(definitions.GYR_RANGE_2000)
+        self.sensor.set_gyr_odr(definitions.GYR_ODR_200)
+        self.sensor.set_gyr_bwp(definitions.GYR_BWP_OSR4)
+
+        self.sensor.disable_fifo_header()
+        self.sensor.enable_data_streaming()
+        # self.sensor.enable_acc_filter_perf()
+        self.sensor.enable_gyr_noise_perf()
+        self.sensor.enable_gyr_filter_perf()
+
+        self.sensor.disable_acc()
+        self.sensor.disable_aux()
+        self.sensor.enable_gyr()
+
+    def load_cfg(self):
+        self.last_cfg_read_time = time()
+        self.gyro_cfg = json.load(open(self.gyro_cfg_path))
+
+    def mainloop(self):
+        while True:
+            # load config
+            if time() - self.last_cfg_read_time > self.gyro_cfg_update_delay:
+                try:
+                    self.gyro_cfg  = json.load(open(self.gyro_cfg_path))
+                    self.last_cfg_read_time = time()
+                    # print(self.gyro_cfg )
+                except:
+                    sleep(self.gyro_cfg_update_delay)
+                    continue
+                
+                # check sensor
+                if self.sensor.read_register(registers.INTERNAL_STATUS) == 0:
+                    self.init_sensor()
+                    print('sensor reinitialized')
+
+            if (not self.gyro_cfg['enable']) or self.gyro_cfg['mode'] != 'mouse':
+                sleep(self.gyro_cfg_update_delay)
+                continue
+
+            plane = self.PLANES.get(self.gyro_cfg['plane'])
+            if plane is None:
+                print(f'unexpected plane "{self.gyro_cfg["plane"]}"')
+                sleep(1)
+                continue
+
+            # read data
+            data = self.sensor.get_gyr_data()
+
+            self.virt_ptr.vel[0] *= 0.8
+            self.virt_ptr.vel[1] *= 0.8
+
+            self.virt_ptr.vel[0] += self.gyro_cfg['sens'] * data[plane[0]]
+            self.virt_ptr.vel[1] += self.gyro_cfg['sens'] * data[plane[1]]
+
+            self.virt_ptr.x.curr -= self.virt_ptr.vel[0] if abs(self.virt_ptr.vel[0]) > 0.05 else 0
+            self.virt_ptr.x.changed = True if abs(self.virt_ptr.x.curr - self.virt_ptr.x.prev) >= 1 else False
+
+            self.virt_ptr.y.curr -= self.virt_ptr.vel[1] if abs(self.virt_ptr.vel[1]) > 0.05 else 0
+            self.virt_ptr.y.changed = True if abs(self.virt_ptr.y.curr - self.virt_ptr.y.prev) >= 1 else False
+
+            # print(f'{data} -> {vel} -> {virt_ptr}')
+
+            # send events
+            events = [
+                InputEvent(EV_REL.REL_X, (int(self.virt_ptr.x.curr) - self.virt_ptr.x.prev) if self.virt_ptr.x.changed else 0),
+                InputEvent(EV_REL.REL_Y, (int(self.virt_ptr.y.curr) - self.virt_ptr.y.prev) if self.virt_ptr.y.changed else 0),
+                InputEvent(EV_SYN.SYN_REPORT, 0)
+            ]
+            self.gyro_inp.send_events(events)
+
+            if abs(self.virt_ptr.x.curr - self.virt_ptr.x.prev) >= 1:
+                self.virt_ptr.x.prev = int(self.virt_ptr.x.curr)
+
+            if abs(self.virt_ptr.y.curr - self.virt_ptr.y.prev) >= 1:
+                self.virt_ptr.y.prev = int(self.virt_ptr.y.curr)
+
+
+# run
+bmi260_drv = BMI260Driver('/home/arch/GPD/BMI260/gyro.json')
+bmi260_drv.mainloop()
