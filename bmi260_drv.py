@@ -83,15 +83,17 @@ class BMI260Driver:
     # FIXME: think about reinit device when 'mode' has been changed
     def init_dev(self):
         # gamepad
-        self.gamepad_dev_fd = open(self.GAMEPAD_DEV_PATH, 'rb')
-        fcntl.fcntl(self.gamepad_dev_fd, fcntl.F_SETFL, os.O_NONBLOCK)
+        try:
+            self.gamepad_dev_fd = open(self.GAMEPAD_DEV_PATH, 'rb')
+            fcntl.fcntl(self.gamepad_dev_fd, fcntl.F_SETFL, os.O_NONBLOCK)
 
-        self.gamepad_dev = Device(self.gamepad_dev_fd)
+            self.gamepad_dev = Device(self.gamepad_dev_fd)
 
-        if self.gamepad_dev.has_property(EV_ABS):
-            print('gamepad device is not recognised!')
+            if self.gamepad_dev.has_property(EV_ABS):
+                print('gamepad device is not recognised!')
+                self.gamepad_dev = None
+        except:
             self.gamepad_dev = None
-            # return
 
         # gyro
         self.gyro_dev = Device()
