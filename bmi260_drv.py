@@ -74,6 +74,8 @@ class BMI260Driver:
         self.init_sensor()
         self.init_dev()
 
+        self.last_update_time = time()
+
         self.virt_ptr = VirtualPointer(
             [0, 0],
             VirtualPointerData(0, 0, False),
@@ -253,6 +255,10 @@ class BMI260Driver:
                 self.process_mouse(plane)
             elif self.gyro_cfg['mode'] in ('gamepad', 'gamepad_l', 'gamepad_r'):
                 self.process_gamepad(plane)
+
+            # print(f'ft: {time() - self.last_update_time}')
+            self.last_update_time = time()
+            sleep(0.0005)
 
 
 # run
