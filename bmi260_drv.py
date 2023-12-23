@@ -10,7 +10,7 @@ from bmi260.BMI270 import BMI270
 from bmi260.config_file import bmi260_config_file
 
 from dataclasses import dataclass
-from libevdev import Device, InputEvent, EV_REL, EV_KEY, EV_ABS, EV_SYN
+from libevdev import Device, InputEvent, EV_REL, EV_KEY, EV_ABS, EV_SYN, EV_MSC, INPUT_PROP_ACCELEROMETER
 
 
 @dataclass
@@ -34,9 +34,14 @@ class BMI260Driver:
 
     MODE_EVENT = {
         'mouse': (EV_REL.REL_X, EV_REL.REL_Y, EV_SYN.SYN_REPORT),
-        'gamepad': (EV_ABS.ABS_RX, EV_ABS.ABS_RY, EV_SYN.SYN_REPORT),
-        'gamepad_r': (EV_ABS.ABS_RX, EV_ABS.ABS_RY, EV_SYN.SYN_REPORT),
-        'gamepad_l': (EV_ABS.ABS_X, EV_ABS.ABS_Y, EV_SYN.SYN_REPORT)
+        'gamepad': (EV_ABS.ABS_X, EV_ABS.ABS_Y, EV_ABS.ABS_Z, EV_ABS.ABS_RX, EV_ABS.ABS_RY, EV_ABS.ABS_RZ, EV_MSC.MSC_TIMESTAMP, EV_SYN.SYN_REPORT),
+    }
+
+    GAMEPAD_ID = {
+        'bustype': 0x3,
+        'vendor': 0x045e,
+        'product': 0x028e,
+        'version': 0x110
     }
 
     GAMEPAD_KEY_EVENTS = [
@@ -63,8 +68,6 @@ class BMI260Driver:
         EV_ABS.ABS_HAT0Y,
     ]
 
-    GAMEPAD_DEV_PATH = '/dev/input/event24'
-
     def __init__(self, gyro_cfg_path, gyro_cfg_update_delay=0.5):
         self.gyro_cfg_path = gyro_cfg_path
         self.gyro_cfg_update_delay = gyro_cfg_update_delay
@@ -85,28 +88,40 @@ class BMI260Driver:
     # FIXME: think about reinit device when 'mode' has been changed
     def init_dev(self):
         # gamepad
-        try:
-            self.gamepad_dev_fd = open(self.GAMEPAD_DEV_PATH, 'rb')
-            fcntl.fcntl(self.gamepad_dev_fd, fcntl.F_SETFL, os.O_NONBLOCK)
+        self.gamepad_dev = None
 
-            self.gamepad_dev = Device(self.gamepad_dev_fd)
+        for i in range(0, 100):
+            try:
+                fd = open(f'/dev/input/event{i}', 'rb')
+            except:
+                continue
 
-            if self.gamepad_dev.has_property(EV_ABS):
-                print('gamepad device is not recognised!')
-                self.gamepad_dev = None
-        except:
-            self.gamepad_dev = None
+            fcntl.fcntl(fd, fcntl.F_SETFL, os.O_NONBLOCK)
+
+            dev = Device(fd)
+            print(f'Found {i}: "{dev.name}" ("/dev/input/event{i}")')
+
+            if dev.name == 'Microsoft X-Box 360 pad':
+                print(f'gamepad device is recognised "/dev/input/event{i}"')
+                self.gamepad_dev = dev
+                self.gamepad_dev.grab()
 
         # gyro
         self.gyro_dev = Device()
         self.gyro_dev.name = 'BMI260 gyro'
+
+        if self.gamepad_dev:
+            self.gyro_dev.id = self.GAMEPAD_ID
 
         if self.gyro_cfg['mode'] == 'mouse':
             self.gyro_dev.enable(EV_KEY.BTN_LEFT)
             self.gyro_dev.enable(EV_KEY.BTN_RIGHT)
             self.gyro_dev.enable(EV_REL.REL_X)
             self.gyro_dev.enable(EV_REL.REL_Y)
-        elif (self.gyro_cfg['mode'] in ('gamepad', 'gamepad_l', 'gamepad_r')) and (self.gamepad_dev is not None):
+        elif (self.gyro_cfg['mode'] == 'gamepad') and (self.gamepad_dev is not None):
+            self.gyro_dev.enable(EV_MSC.MSC_TIMESTAMP)
+            self.gyro_dev.enable(INPUT_PROP_ACCELEROMETER)
+
             for e in self.GAMEPAD_KEY_EVENTS:
                 self.gyro_dev.enable(e)
 
@@ -139,20 +154,29 @@ class BMI260Driver:
         self.sensor.enable_gyr_noise_perf()
         self.sensor.enable_gyr_filter_perf()
 
-        self.sensor.disable_acc()
         self.sensor.disable_aux()
         self.sensor.enable_gyr()
+        self.sensor.enable_acc()
 
     def load_cfg(self):
         self.last_cfg_read_time = time()
         self.gyro_cfg = json.load(open(self.gyro_cfg_path))
 
-    def process_mouse(self, plane):
+    def process_mouse(self):
         if (not self.gyro_cfg['enable']):
             sleep(self.gyro_cfg_update_delay)
+            self.sensor.disable_gyr()
+            return
+
+        plane = self.PLANES.get(self.gyro_cfg['plane'])
+        if plane is None:
+            print(f'unexpected plane "{self.gyro_cfg["plane"]}"')
+            sleep(1)
             return
 
         # read data
+        self.sensor.enable_gyr()
+
         data = self.sensor.get_gyr_data()
 
         self.virt_ptr.vel[0] *= 0.8
@@ -183,7 +207,7 @@ class BMI260Driver:
         if abs(self.virt_ptr.y.curr - self.virt_ptr.y.prev) >= 1:
             self.virt_ptr.y.prev = int(self.virt_ptr.y.curr)
 
-    def process_gamepad(self, plane):
+    def process_gamepad(self):
         # forward gamepad events
         for e in self.gamepad_dev.events():
             # if e.code in self.MODE_EVENT[self.gyro_cfg['mode']]:
@@ -196,33 +220,38 @@ class BMI260Driver:
                 VirtualPointerData(0, 0, False),
                 VirtualPointerData(0, 0, False)
             )
+            self.sensor.disable_acc()
+            self.sensor.disable_gyr()
             sleep(0.005)
             return
 
         # read data
-        data = self.sensor.get_raw_gyr_data()
+        self.sensor.enable_gyr()
+        self.sensor.enable_acc()
+
+        gyro = self.sensor.get_raw_gyr_data()
+        acc = self.sensor.get_raw_acc_data()
+        tm = self.sensor.get_sensor_time()
 
         rel = (
-            self.gyro_cfg['sens'] * data[plane[0]],
-            self.gyro_cfg['sens'] * data[plane[1]]
+            int(self.gyro_cfg['sens'] * acc[0]),
+            int(self.gyro_cfg['sens'] * acc[1]),
+            int(self.gyro_cfg['sens'] * acc[2]),
+            int(self.gyro_cfg['sens'] * gyro[0]),
+            int(self.gyro_cfg['sens'] * gyro[1]),
+            int(self.gyro_cfg['sens'] * gyro[2]),
         )
-
-        self.virt_ptr.x.curr += rel[0]
-        self.virt_ptr.y.curr += rel[1]
-
-        ev = (
-            EV_ABS.ABS_X if self.gyro_cfg['mode'] == 'gamepad_l' else EV_ABS.ABS_RX,
-            EV_ABS.ABS_Y if self.gyro_cfg['mode'] == 'gamepad_l' else EV_ABS.ABS_RY
-        )
-
-        self.virt_ptr.x.curr = max(self.gamepad_dev.absinfo[ev[0]].minimum, min(self.gamepad_dev.absinfo[ev[0]].maximum, self.virt_ptr.x.curr))
-        self.virt_ptr.y.curr = max(self.gamepad_dev.absinfo[ev[1]].minimum, min(self.gamepad_dev.absinfo[ev[1]].maximum, self.virt_ptr.y.curr))
 
         # send events
         events = [
-            InputEvent(ev[0], int(self.virt_ptr.x.curr)),
-            InputEvent(ev[1], int(self.virt_ptr.y.curr)),
-            InputEvent(EV_SYN.SYN_REPORT, 0)
+            InputEvent(EV_MSC.MSC_TIMESTAMP, tm),
+            InputEvent(EV_ABS.ABS_RX, rel[0]),
+            InputEvent(EV_ABS.ABS_RY, rel[1]),
+            InputEvent(EV_ABS.ABS_RZ, rel[2]),
+            InputEvent(EV_ABS.ABS_X, rel[3]),
+            InputEvent(EV_ABS.ABS_Y, rel[4]),
+            InputEvent(EV_ABS.ABS_Z, rel[5]),
+            InputEvent(EV_SYN.SYN_REPORT, 0),
         ]
         self.gyro_inp.send_events(events)
         sleep(0.005)
@@ -244,17 +273,11 @@ class BMI260Driver:
                     self.init_sensor()
                     print('sensor reinitialized')
 
-            plane = self.PLANES.get(self.gyro_cfg['plane'])
-            if plane is None:
-                print(f'unexpected plane "{self.gyro_cfg["plane"]}"')
-                sleep(1)
-                continue
-
             # process
             if self.gyro_cfg['mode'] == 'mouse':
-                self.process_mouse(plane)
-            elif self.gyro_cfg['mode'] in ('gamepad', 'gamepad_l', 'gamepad_r'):
-                self.process_gamepad(plane)
+                self.process_mouse()
+            elif self.gyro_cfg['mode'] == 'gamepad':
+                self.process_gamepad()
 
             # print(f'ft: {time() - self.last_update_time}')
             self.last_update_time = time()
